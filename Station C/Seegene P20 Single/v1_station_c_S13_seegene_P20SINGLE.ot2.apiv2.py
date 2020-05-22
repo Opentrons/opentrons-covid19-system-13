@@ -6,7 +6,7 @@ import math
 
 # metadata
 metadata = {
-    'protocolName': 'Version 4 S7 Station C',
+    'protocolName': 'Version 1 S13 Station C Seegene P20 Single',
     'author': 'Nick <protocols@opentrons.com>',
     'source': 'Custom Protocol Request',
     'apiLevel': '2.3'
