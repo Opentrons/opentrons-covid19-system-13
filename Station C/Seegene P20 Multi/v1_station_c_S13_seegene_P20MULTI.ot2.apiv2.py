@@ -14,6 +14,7 @@ metadata = {
 NUM_SAMPLES = 8  # start with 8 samples, slowly increase to 48, then 94 (max is 94)
 PREPARE_MASTERMIX = True
 TIP_TRACK = False
+SAMPLE_VOL = 8
 
 
 def run(ctx: protocol_api.ProtocolContext):
@@ -97,49 +98,79 @@ resuming.')
         }
     }
 
-    if PREPARE_MASTERMIX:
+    vol_overage = 1.2
+    total_mm_vol = mm_dict['volume']*(NUM_SAMPLES+2)*vol_overage
+    # translate total mastermix volume to starting height
+    r = mm_tube.diameter/2
+    mm_height = total_mm_vol/(math.pi*(r**2)) - 5
 
+    def h_track(vol):
+        nonlocal mm_height
+        dh = 1.1*vol/(math.pi*(r**2))  # compensate for 10% theoretical volume loss
+        mm_height = mm_height - dh if mm_height - dh > 2 else 2  # stop at 2mm above mm tube bottom
+        return mm_tube.bottom(mm_height)
+
+    if PREPARE_MASTERMIX:
         for i, (tube, vol) in enumerate(mm_dict['components'].items()):
-            comp_vol = vol*(NUM_SAMPLES+2)*1.3  # 10% volume overage for samples + controls
-            disp_loc = mm_tube.bottom(5) if comp_vol < 50 else mm_tube.top(-5)
+            comp_vol = vol*(NUM_SAMPLES)*vol_overage
             pick_up(p300)
-            p300.transfer(comp_vol, tube.bottom(1), disp_loc, new_tip='never')
-            if i < len(mm_dict['components'].items()) - 1:  # keep tip if last component
+            num_trans = math.ceil(comp_vol/160)
+            vol_per_trans = comp_vol/num_trans
+            for _ in range(num_trans):
+                p300.air_gap(20)
+                p300.aspirate(vol_per_trans, tube)
+                ctx.delay(seconds=3)
+                p300.touch_tip(tube)
+                p300.air_gap(20)
+                p300.dispense(20, mm_tube.top())  # void air gap
+                p300.dispense(vol_per_trans, mm_tube.bottom(2))
+                p300.dispense(20, mm_tube.top())  # void pre-loaded air gap
+                p300.blow_out(mm_tube.top())
+                p300.touch_tip(mm_tube)
+            if i < len(mm_dict['components'].items()) - 1:  # only keep tip if last component and p300 in use
                 p300.drop_tip()
-        mm_total_vol = mm_dict['volume']*(NUM_SAMPLES+2)*1.3 # include mastermix volume overage
+        mm_total_vol = mm_dict['volume']*(NUM_SAMPLES)*vol_overage
         if not p300.hw_pipette['has_tip']:  # pickup tip with P300 if necessary for mixing
             pick_up(p300)
         mix_vol = mm_total_vol / 2 if mm_total_vol / 2 <= 200 else 200  # mix volume is 1/2 MM total, maxing at 200µl
-        p300.mix(15, mix_vol, mm_tube)
-        # pip.blow_out(mm_tube.top(-2))
+        mix_loc = mm_tube.bottom(20) if NUM_SAMPLES > 48 else mm_tube.bottom(5)
+        p300.mix(7, mix_vol, mix_loc)
+        p300.blow_out(mm_tube.top())
+        p300.touch_tip()
 
     # transfer mastermix to strips
-    num_mm_dest_cols = math.ceil((NUM_SAMPLES+2)/8)
-    vol_per_strip_well = num_mm_dest_cols*mm_dict['volume']*1.2
-    mm_strip = mm_strips.columns()[0]
+    num_strips = 1 if num_cols <= 9 else 2
+    mm_strips = mm_strips.columns()[:num_strips]
     if not p300.hw_pipette['has_tip']:
         pick_up(p300)
-    for well in mm_strip:
-        p300.transfer(vol_per_strip_well, mm_tube, well, new_tip='never')
+    for strip in mm_strips:
+        if num_cols <= 9:
+            vol_per_strip_well = num_cols*mm_dict['volume']*((vol_overage-1)/2+1)
+        else:
+            vol_per_strip_well = math.ceil(num_cols/2)*mm_dict['volume']*((vol_overage-1)/2+1)
+        for well in strip:
+            p300.transfer(vol_per_strip_well, mm_tube, well, new_tip='never')
+    p300.drop_tip()
 
     # transfer mastermix to plate
     mm_vol = mm_dict['volume']
-    mm_dests = [d.bottom(2) for d in pcr_plate.rows()[0][:num_mm_dest_cols]]
     pick_up(m20)
-    m20.transfer(mm_vol, mm_strip[0].bottom(0.5), mm_dests, new_tip='never')
+    for i, d in enumerate(sample_dests):
+        if num_cols <= 9:
+            source = mm_strips[0][0]
+        else:
+            source = mm_strips[i//(math.ceil(num_cols/2))][0]
+        m20.transfer(mm_vol, source.bottom(0.5), d, new_tip='never')
     m20.drop_tip()
 
     # transfer samples to corresponding locations
-    sample_vol = 25 - mm_vol
     for s, d in zip(sources, sample_dests):
         pick_up(m20)
-        m20.transfer(sample_vol, s.bottom(2), d.bottom(2), new_tip='never')
+        m20.transfer(SAMPLE_VOL, s.bottom(2), d.bottom(2), new_tip='never')
         m20.mix(1, 10, d.bottom(2))
         m20.blow_out(d.top(-2))
         m20.aspirate(5, d.top(2))  # suck in any remaining droplets on way to trash
         m20.drop_tip()
-
-    # NOTE: transfer positive and negative controls manually
 
     # track final used tip
     if TIP_TRACK and not ctx.is_simulating():
